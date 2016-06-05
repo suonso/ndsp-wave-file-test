@@ -9,10 +9,11 @@
 #include "waveLoader.hpp"
 #include "Types.hpp"
 
-void fillBuffer(u8 * bufferToFill, size_t size, std::ifstream & stream);
+void fillBuffer(u8 * bufferToFill, size_t size, std::ifstream & stream, size_t buffersize);
 
-void fillBuffer(u8 * bufferToFill, size_t size, std::ifstream & stream)
+void fillBuffer(u8 * bufferToFill, size_t size, std::ifstream & stream, size_t buffersize)
 {
+	std::memset(bufferToFill,0,buffersize);
 	stream.read(reinterpret_cast<char *>(bufferToFill), size);
 	DSP_FlushDataCache(bufferToFill, size);
 }
@@ -23,10 +24,10 @@ int main(int argc, char* argv[])
 
 	consoleInit(GFX_TOP, nullptr);
 
-	// The dsp channel number
-	constexpr int channel = 0;
+	// audio channel number
+	const int channel = 0;
 
-	u8 fillBlock = 0;
+	u8 bufferIndex = 0;
 
 	// Initialize ndsp
 	ndspInit();
@@ -36,20 +37,20 @@ int main(int argc, char* argv[])
 
   bool success = readWaveFile(std::string("test.wav"), fileStream, audioInfo);
 
-  if( !success )
+  if(!success)
   {
     gfxExit();
   	ndspExit();
     return 1;
   }
 
-	// 512KB (or sighltly less) for each buffer so about 1Mo for the whole buffer
-	u32 samplesPerBuff = 512000 / audioInfo.bytesPerSample;
-	size_t halfBufferSize = samplesPerBuff * audioInfo.bytesPerSample;
+	// 512KB for each buffer so about 1MB for the whole buffer
+	u32 samplesPerBuff = 512000 / audioInfo.bytesPerSample / audioInfo.numberOfChannel;
+	size_t halfBufferSize = samplesPerBuff * audioInfo.bytesPerSample * audioInfo.numberOfChannel;
 
   u8 * data = static_cast<u8 *>(linearAlloc(halfBufferSize * 2));
 
-	if( data == NULL || data == nullptr )
+	if(data == NULL)
 	{
 		std::cout << "allocation failed" << std::endl;
 		gfxExit();
@@ -85,20 +86,21 @@ int main(int argc, char* argv[])
   mix[1] = 1.0;
   ndspChnSetMix(channel, mix);
 
-	// Create and play a wav buffer
 	ndspWaveBuf waveBuf[2];
 	std::memset(&waveBuf, 0, sizeof(ndspWaveBuf));
 
-	waveBuf[0].data_vaddr = reinterpret_cast<u32 *>(&data[0]);
+	waveBuf[0].data_vaddr = &data[0];
 	waveBuf[0].nsamples = samplesPerBuff;
 	waveBuf[0].looping = false;
-	waveBuf[1].data_vaddr = reinterpret_cast<u32 *>(&data[samplesPerBuff]);
+	waveBuf[0].status = NDSP_WBUF_FREE;
+	waveBuf[1].data_vaddr = &data[halfBufferSize];
 	waveBuf[1].nsamples = samplesPerBuff;
 	waveBuf[1].looping = false;
+	waveBuf[1].status = NDSP_WBUF_FREE;
 
 	size_t readedSize = 0;
 
-	fillBuffer(data, halfBufferSize * 2, fileStream);
+	fillBuffer(data, halfBufferSize * 2, fileStream,halfBufferSize * 2);
 	readedSize += (halfBufferSize * 2);
 
 	ndspChnWaveBufAdd(channel, &waveBuf[0]);
@@ -113,7 +115,7 @@ int main(int argc, char* argv[])
 		if(keys & KEY_START)
 			break;
 
-		if(waveBuf[fillBlock].status == NDSP_WBUF_DONE)
+		if(waveBuf[bufferIndex].status == NDSP_WBUF_DONE)
 		{
 			double sizeleft = (double)audioInfo.dataSize - (double)readedSize;
 			size_t toRead;
@@ -132,8 +134,8 @@ int main(int argc, char* argv[])
 
 			if(toRead > 0)
 			{
-				fillBuffer(reinterpret_cast<u8 *>(waveBuf[fillBlock].data_pcm16), toRead, fileStream);
-				ndspChnWaveBufAdd(channel, &waveBuf[fillBlock]);
+				fillBuffer(reinterpret_cast<u8 *>(waveBuf[bufferIndex].data_pcm16), toRead, fileStream,halfBufferSize);
+				ndspChnWaveBufAdd(channel, &waveBuf[bufferIndex]);
 				readedSize += toRead;
 			}
 
@@ -141,8 +143,8 @@ int main(int argc, char* argv[])
 			// bit hack number 5
 			// tldr : 0 xor 1 = 1, 1 xor 1 = 0
 			// HOW I DIDN'T TOUGHT ABOUT THAT !!
-			// can be simplified to fillBlock ^= 1;
-			fillBlock = fillBlock ^ 1;
+			// can be simplified to bufferIndex ^= 1;
+			bufferIndex = bufferIndex ^ 1;
 		}
 
 		gfxFlushBuffers();
